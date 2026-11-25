@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/broqr-core", "crates/broqr-cli", "src-tauri"]
+default-members = ["crates/broqr-core", "crates/broqr-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+broqr-core = { path = "crates/broqr-core" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

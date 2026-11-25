@@ -1,0 +1,135 @@
+name: Test, build, and draft release
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Do not cancel older main builds: every successful push gets its own draft.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run check
+      - run: npm audit --audit-level=high
+
+  desktop:
+    name: Build (${{ matrix.name }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            targets: x86_64-pc-windows-msvc
+            build-args: --target x86_64-pc-windows-msvc
+          - os: macos-latest
+            name: macos-universal
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build-args: --target universal-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.name }}
+      - run: npm ci
+      - name: Build installers
+        run: npm run desktop:build -- ${{ matrix.build-args }} -- --locked
+      - name: Collect installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find target -path '*/release/bundle/*' -type f \
+            \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.dmg' \) \
+            -exec cp {} release-assets/ \;
+          if ! find release-assets -type f -print -quit | grep -q .; then
+            echo 'No installers found.' >&2
+            exit 1
+          fi
+          ls -lh release-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BroQR-${{ matrix.name }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 30
+
+  draft-release:
+    name: Create draft release
+    needs: desktop
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: BroQR-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create or update this build's draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:7}"
+          tag="main-build-${GITHUB_RUN_NUMBER}-${short_sha}"
+          title="BroQR main build #${GITHUB_RUN_NUMBER} (${short_sha})"
+          cat > release-notes.md <<EOF
+          Automatic development build from main.
+
+          - Commit: ${GITHUB_SHA}
+          - Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Windows x64: NSIS (.exe) and MSI installers.
+          - macOS universal: DMG for Intel and Apple Silicon.
+
+          These builds are unsigned and have not been tested on a physical printer.
+          This release stays a draft until you explicitly publish it.
+          EOF
+
+          if gh release view "$tag" --json isDraft > existing-release.json 2>/dev/null; then
+            if ! jq -e '.isDraft == true' existing-release.json > /dev/null; then
+              echo "Refusing to overwrite an already-published release: $tag" >&2
+              exit 1
+            fi
+            gh release edit "$tag" --title "$title" --notes-file release-notes.md
+          else
+            gh release create "$tag" --draft --prerelease \
+              --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md
+          fi
+          gh release upload "$tag" release-assets/* --clobber
+          url="$(gh release view "$tag" --json url --jq .url)"
+          echo "Draft release: $url" >> "$GITHUB_STEP_SUMMARY"

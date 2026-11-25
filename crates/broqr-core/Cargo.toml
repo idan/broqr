@@ -1,0 +1,15 @@
+[package]
+name = "broqr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+qrcodegen = "1.8"
+rqrr = "0.10"
